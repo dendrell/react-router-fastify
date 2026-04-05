@@ -8,7 +8,12 @@ import type { IncomingMessage } from 'node:http'
 import path from 'node:path'
 import type { ServerBuild } from 'react-router'
 import { createRequestHandler as createRemixRequestHandler } from 'react-router'
-import { resolvePathnameWithinRoot, resolveServerBuildFileUrl } from './path-utils.ts'
+import {
+  getPathnameWithinPublicPath,
+  normalizePublicPath,
+  resolvePathnameWithinRoot,
+  resolveServerBuildFileUrl,
+} from './path-utils.ts'
 
 type MaybePromise<T> = T | Promise<T>
 type ContextType = Parameters<ReturnType<typeof createRemixRequestHandler>>[1]
@@ -98,7 +103,7 @@ async function maybeServeStaticFile(
 }
 
 function getPathname(request: FastifyRequest) {
-  return new URL(request.raw.url ?? request.url, 'http://localhost').pathname.replace(/^\/+/, '')
+  return new URL(request.raw.url ?? request.url, 'http://localhost').pathname
 }
 
 type CreateAppOptions = {
@@ -108,16 +113,19 @@ type CreateAppOptions = {
   serverTimingHeader?: boolean
 }
 
-async function createApp(getHandler: () => Promise<RequestHandler>, options: CreateAppOptions) {
-  const publicRoot = path.resolve('public')
-  const clientRoot = path.resolve('build/client')
-  const clientAssetsRoot = path.resolve('build/client/assets')
+async function createApp(
+  getHandler: () => Promise<RequestHandler>,
+  build: ServerBuild,
+  options: CreateAppOptions,
+) {
+  const staticRoot = path.resolve(build.assetsBuildDirectory)
+  const publicPath = normalizePublicPath(build.publicPath)
   const requestStartedAt = new WeakMap<IncomingMessage, number>()
 
   const app = fastify()
 
   await app.register(fastifyStatic, {
-    root: publicRoot,
+    root: staticRoot,
     serve: false,
   })
 
@@ -134,37 +142,24 @@ async function createApp(getHandler: () => Promise<RequestHandler>, options: Cre
     })
   }
 
-  if (options.serveClientAssets) {
-    app.all('/assets/*', async (request, reply) => {
-      let assetPath = (request.params as { '*': string })['*']
-      let served = await maybeServeStaticFile(reply, {
-        pathname: assetPath,
-        root: clientAssetsRoot,
-        immutable: true,
-        maxAge: options.assetsMaxAge ?? '1y',
-      })
-
-      if (!served) {
-        return reply.callNotFound()
-      }
-    })
-  }
-
   app.all('/*', async (request, reply) => {
     let pathname = getPathname(request)
 
-    if (await maybeServeStaticFile(reply, { pathname, root: publicRoot })) {
-      return
-    }
+    if (options.serveClientAssets) {
+      let relativePathname = getPathnameWithinPublicPath(pathname, publicPath)
+      if (relativePathname) {
+        let isAssetsPath = relativePathname === 'assets' || relativePathname.startsWith('assets/')
 
-    if (
-      options.serveClientAssets &&
-      (await maybeServeStaticFile(reply, {
-        pathname,
-        root: clientRoot,
-      }))
-    ) {
-      return
+        let served = await maybeServeStaticFile(reply, {
+          pathname: relativePathname,
+          root: staticRoot,
+          immutable: isAssetsPath,
+          maxAge: isAssetsPath ? (options.assetsMaxAge ?? '1y') : undefined,
+        })
+        if (served) {
+          return
+        }
+      }
     }
 
     const handler = await getHandler()
@@ -189,7 +184,7 @@ export function createServerRunner(
     const serverHost = options.host ?? serveOptions.host
 
     const buildFile = resolveServerBuildFileUrl(serverBundleFile)
-    const build = await import(buildFile.href)
+    const build: ServerBuild = await import(buildFile.href)
     const handleRequest = createRequestHandler({
       build,
       mode: serverMode,
@@ -197,7 +192,7 @@ export function createServerRunner(
     })
 
     const { prepare, ...appOptions } = options
-    const app = await createApp(async () => handleRequest, appOptions)
+    const app = await createApp(async () => handleRequest, build, appOptions)
     await prepare?.(app)
     await app.listen({
       port: serverPort,

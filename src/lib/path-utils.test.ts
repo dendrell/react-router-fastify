@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { resolvePathnameWithinRoot, resolveServerBuildFileUrl } from './path-utils.ts'
+import {
+  getPathnameWithinPublicPath,
+  normalizePublicPath,
+  resolvePathnameWithinRoot,
+  resolveServerBuildFileUrl,
+} from './path-utils.ts'
 
 describe('resolvePathnameWithinRoot', () => {
   it('returns normalized path when within root', () => {
@@ -33,5 +38,35 @@ describe('resolveServerBuildFileUrl', () => {
     expect(() => resolveServerBuildFileUrl('https://example.com/server.mjs')).toThrow(
       'serverBuildFile must use the file: protocol',
     )
+  })
+})
+
+describe('normalizePublicPath', () => {
+  it('ensures leading and trailing slashes', () => {
+    expect(normalizePublicPath('app')).toBe('/app/')
+    expect(normalizePublicPath('/app')).toBe('/app/')
+    expect(normalizePublicPath('/app/')).toBe('/app/')
+  })
+
+  it('collapses duplicate slashes', () => {
+    expect(normalizePublicPath('//app//nested//')).toBe('/app/nested/')
+  })
+})
+
+describe('getPathnameWithinPublicPath', () => {
+  it('returns relative path when pathname is under publicPath', () => {
+    expect(getPathnameWithinPublicPath('/app/assets/logo.svg', '/app/')).toBe('assets/logo.svg')
+  })
+
+  it('returns empty string when pathname equals publicPath', () => {
+    expect(getPathnameWithinPublicPath('/app', '/app/')).toBe('')
+  })
+
+  it('returns null when pathname is outside publicPath', () => {
+    expect(getPathnameWithinPublicPath('/other/assets/logo.svg', '/app/')).toBeNull()
+  })
+
+  it('supports root publicPath', () => {
+    expect(getPathnameWithinPublicPath('/assets/logo.svg', '/')).toBe('assets/logo.svg')
   })
 })

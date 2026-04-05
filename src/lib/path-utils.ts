@@ -14,6 +14,28 @@ export function resolvePathnameWithinRoot(root: string, pathname: string): strin
   return normalizedPathname
 }
 
+export function normalizePublicPath(publicPath: string): string {
+  let normalized = `/${publicPath}`.replace(/\/+/g, '/')
+  if (!normalized.endsWith('/')) {
+    normalized = `${normalized}/`
+  }
+  return normalized
+}
+
+export function getPathnameWithinPublicPath(pathname: string, publicPath: string): string | null {
+  let normalizedPublicPath = normalizePublicPath(publicPath)
+  if (normalizedPublicPath === '/') {
+    return pathname.replace(/^\/+/, '')
+  }
+
+  let publicPrefix = normalizedPublicPath.slice(0, -1)
+  if (pathname !== publicPrefix && !pathname.startsWith(`${publicPrefix}/`)) {
+    return null
+  }
+
+  return pathname.slice(publicPrefix.length).replace(/^\/+/, '')
+}
+
 export function resolveServerBuildFileUrl(input: string | URL): URL {
   let url: URL
   if (input instanceof URL) {

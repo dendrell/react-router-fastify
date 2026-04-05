@@ -52,7 +52,11 @@ async function createTempServerBuildModule(fileName = 'server-build.mjs'): Promi
   let dir = await mkdtemp(path.join(os.tmpdir(), 'rrf-runner-'))
   let filePath = path.join(dir, fileName)
   await mkdir(path.dirname(filePath), { recursive: true })
-  await writeFile(filePath, "export default { marker: 'runner-build' }\n", 'utf8')
+  await writeFile(
+    filePath,
+    "export const publicPath = '/'\nexport const assetsBuildDirectory = './build/client'\nexport default { marker: 'runner-build' }\n",
+    'utf8',
+  )
   return { dir, filePath }
 }
 
@@ -96,7 +100,7 @@ describe('createServerRunner startup wiring', () => {
     expect(returnedApp).toBe(mockState.app)
     expect(mockState.fastifyFactory).toHaveBeenCalledTimes(1)
     expect(mockState.app.register).toHaveBeenCalledWith(mockState.plugin, {
-      root: path.resolve('public'),
+      root: path.resolve('build/client'),
       serve: false,
     })
     expect(mockState.createRemixRequestHandler).toHaveBeenCalledTimes(1)

@@ -17,8 +17,10 @@ npx nypm add react-router-fastify
 ## What this package does
 
 - Creates a Fastify app that serves:
-  - files from `public/`
-  - optional client assets from `build/client/assets` and `build/client`
+  - optional client/static files from your React Router server build metadata:
+    - URL base from `build.publicPath`
+    - filesystem root from `build.assetsBuildDirectory`
+  - `/assets/*` files with immutable cache headers
   - React Router requests through `createRequestHandler`
 - Returns a runner function compatible with `node-cluster-serve`'s `runServerModule`.
 
@@ -108,8 +110,9 @@ declare function createServerRunner(
   - default: `./build/server/index.js`
   - string paths are resolved from `process.cwd()`
 - `options.serveClientAssets`:
-  - if `true`, serves `/assets/*` from `build/client/assets` with immutable cache headers
-  - also allows fallback serving from `build/client`
+  - if `true`, serves static files from `build.assetsBuildDirectory`
+  - static routing is scoped under `build.publicPath`
+  - requests under `<publicPath>/assets/*` use immutable cache headers
 - `options.assetsMaxAge`:
   - cache max-age for `/assets/*` (default `1y`)
 - `options.logRequests`:
@@ -128,10 +131,10 @@ declare function createServerRunner(
 
 Request handling order:
 
-1. Serve from `public/` when file exists.
-2. If `serveClientAssets` is enabled, serve `/assets/*` from `build/client/assets`.
-3. If `serveClientAssets` is enabled, attempt fallback from `build/client`.
-4. Otherwise forward request to React Router handler.
+1. If `serveClientAssets` is enabled and the request is under `build.publicPath`, try serving from
+   `build.assetsBuildDirectory`.
+2. Requests under `<publicPath>/assets/*` are served with immutable cache headers.
+3. Otherwise forward request to React Router handler.
 
 Path traversal-like input is normalized and constrained to remain inside each static root.
 
