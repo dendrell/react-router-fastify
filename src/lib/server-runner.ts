@@ -2,7 +2,7 @@ import fastifyStatic from '@fastify/static'
 import { createRequest, sendResponse } from '@remix-run/node-fetch-server'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import fastify from 'fastify'
-import type { ClosableServer, ServeOptions, ServerMode } from 'node-cluster-serve'
+import type { ServeFunction, ServerMode } from 'node-cluster-serve'
 import { stat } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
 import path from 'node:path'
@@ -177,8 +177,8 @@ export function createServerRunner(
     port?: number
     host?: string
   },
-) {
-  return async (serveOptions: ServeOptions): Promise<ClosableServer> => {
+): ServeFunction {
+  return async (serveOptions) => {
     const serverMode = options.mode ?? serveOptions.mode
     const serverPort = options.port ?? serveOptions.port
     const serverHost = options.host ?? serveOptions.host
