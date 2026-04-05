@@ -126,7 +126,7 @@ async function createFastifyApp(
   const staticRoot = path.resolve(build.assetsBuildDirectory)
   const publicPath = normalizePublicPath(build.publicPath)
   const requestTimeMap = new WeakMap<IncomingMessage, number>()
-  const timingEnabled = options.serverTimingHeader || options.logRequests
+  const needsHooks = options.serverTimingHeader || options.logRequests
 
   const app = fastify()
 
@@ -142,26 +142,22 @@ async function createFastifyApp(
     serve: false,
   })
 
-  if (options.logRequests) {
+  if (needsHooks) {
     app.addHook('onRequest', async (request) => {
-      if (timingEnabled) {
-        requestTimeMap.set(request.raw, performance.now())
-      }
+      requestTimeMap.set(request.raw, performance.now())
     })
 
     app.addHook('onResponse', async (request, reply) => {
-      if (timingEnabled) {
-        const startedAt = requestTimeMap.get(request.raw)
-        const elapsedMs = startedAt ? (performance.now() - startedAt).toFixed(2) : -1
-        if (options.serverTimingHeader) {
-          reply.raw.setHeader('Server-Timing', `total;dur=${elapsedMs}`)
-        }
-        if (options.logRequests) {
-          const pathname = getPathname(request)
-          console.log(`${request.method} ${pathname} ${reply.statusCode} - ${elapsedMs} ms`)
-        }
-        requestTimeMap.delete(request.raw)
+      const startedAt = requestTimeMap.get(request.raw)
+      const elapsedMs = startedAt ? (performance.now() - startedAt).toFixed(2) : -1
+      if (options.serverTimingHeader) {
+        reply.raw.setHeader('Server-Timing', `total;dur=${elapsedMs}`)
       }
+      if (options.logRequests) {
+        const pathname = getPathname(request)
+        console.log(`${request.method} ${pathname} ${reply.statusCode} - ${elapsedMs} ms`)
+      }
+      requestTimeMap.delete(request.raw)
     })
   }
 

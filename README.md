@@ -21,7 +21,7 @@ npx nypm add react-router-fastify
     - URL base from `build.publicPath`
     - filesystem root from `build.assetsBuildDirectory`
   - `/assets/*` files with immutable cache headers
-  - React Router requests through `createRequestHandler`
+  - React Router requests through `createRequestHandler` + `@remix-run/node-fetch-server`
 - Returns a runner function compatible with `node-cluster-serve`'s `runServerModule`.
 
 ## Quick start
@@ -83,13 +83,14 @@ node ./run-server.ts
 
 ```ts
 import type { FastifyInstance } from 'fastify'
-import type { ClosableServer, ServeOptions, ServerMode } from 'node-cluster-serve'
+import type { ServeFunction, ServerMode } from 'node-cluster-serve'
 
 type CreateAppOptions = {
   serveClientAssets: boolean
   assetsMaxAge?: string
   logRequests?: boolean
   serverTimingHeader?: boolean
+  bodySizeLimit?: number
 }
 
 type RunnerOptions = CreateAppOptions & {
@@ -102,7 +103,7 @@ type RunnerOptions = CreateAppOptions & {
 declare function createServerRunner(
   serverBundleFile?: string | URL,
   options: RunnerOptions,
-): (serveOptions: ServeOptions) => Promise<ClosableServer>
+): ServeFunction
 ```
 
 - `serverBundleFile`:
@@ -119,8 +120,12 @@ declare function createServerRunner(
   - when `true`, logs request method, pathname, status, and elapsed time in `onResponse` hook
   - default: `false`
 - `options.serverTimingHeader`:
-  - when `true`, sets `Server-Timing: total;dur=<ms>` on React Router handler responses
+  - when `true`, sets `Server-Timing: total;dur=<ms>` in the `onResponse` hook
+  - independent of request logging (`logRequests`)
   - default: `false`
+- `options.bodySizeLimit`:
+  - max buffered body size (bytes) for `application/x-www-form-urlencoded` and `multipart/form-data`
+  - default: `4194304` (`4MB`)
 - `options.prepare(app)`:
   - hook to register plugins/routes before calling `listen`
 - `options.mode`, `options.port`, `options.host`:
@@ -142,6 +147,8 @@ Path traversal-like input is normalized and constrained to remain inside each st
 
 - `createServerRunner` does not start cluster processes itself; use it with `node-cluster-serve`.
 - The server build module is imported dynamically at runtime.
+- The adapter buffers `application/x-www-form-urlencoded` and `multipart/form-data` payloads so
+  React Router can consume them through the Web `Request` APIs.
 
 ## License
 

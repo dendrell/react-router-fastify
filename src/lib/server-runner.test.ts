@@ -201,6 +201,55 @@ describe('createServerRunner startup wiring', () => {
     expect((hookCalls[1] ?? [])[0]).toBe('onResponse')
   })
 
+  it('registers timing hooks and sets Server-Timing when serverTimingHeader is enabled', async () => {
+    let temp = await createTempServerBuildModule()
+    tempDirs.push(temp.dir)
+
+    let run = createServerRunner(pathToFileURL(temp.filePath), {
+      serveClientAssets: false,
+      serverTimingHeader: true,
+    })
+
+    await run({
+      mode: 'production',
+      host: '127.0.0.1',
+      port: 4319,
+    } as ServeOptions)
+
+    expect(mockState.app.addHook).toHaveBeenCalledTimes(2)
+    let hookCalls = mockState.app.addHook.mock.calls as unknown[][]
+    let onRequest = hookCalls.find((call) => call[0] === 'onRequest')?.[1] as
+      | ((request: any) => Promise<void>)
+      | undefined
+    let onResponse = hookCalls.find((call) => call[0] === 'onResponse')?.[1] as
+      | ((request: any, reply: any) => Promise<void>)
+      | undefined
+    expect(onRequest).toBeTypeOf('function')
+    expect(onResponse).toBeTypeOf('function')
+
+    let raw = {
+      url: '/resource',
+      setHeader: vi.fn(),
+    }
+    let request = {
+      raw,
+      url: '/resource',
+      method: 'GET',
+    }
+    let reply = {
+      raw,
+      statusCode: 200,
+    }
+
+    await onRequest?.(request)
+    await onResponse?.(request, reply)
+
+    expect(raw.setHeader).toHaveBeenCalledWith(
+      'Server-Timing',
+      expect.stringMatching(/^total;dur=/),
+    )
+  })
+
   it('resolves relative serverBuildFile from process.cwd()', async () => {
     let temp = await createTempServerBuildModule(path.join('build', 'server', 'index.mjs'))
     tempDirs.push(temp.dir)
