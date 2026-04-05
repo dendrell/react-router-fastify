@@ -146,8 +146,8 @@ declare function createServerRunner(
 
 - `createServerRunner` does not manage worker processes itself.
 - The server build module is imported dynamically at runtime.
-- When deploying behind a reverse proxy, set `origin` to the public URL you want route handlers to
-  see.
+- When deploying behind a reverse proxy, set `origin` to the public URL your React Router handlers
+  should use as the request origin.
 
 ## License
 
