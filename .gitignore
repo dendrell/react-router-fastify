@@ -1,0 +1,13 @@
+.DS_Store
+*.log
+node_modules/
+.pnpm-store/
+.pnpm/
+
+coverage/
+
+.react-router/
+.env
+build/
+dist/
+

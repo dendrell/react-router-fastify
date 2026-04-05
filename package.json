@@ -1,0 +1,67 @@
+{
+  "name": "react-router-fastify",
+  "version": "0.9.0",
+  "description": "Fastify adapter for React Router server builds",
+  "keywords": [
+    "fastify",
+    "react-router",
+    "react-router-server"
+  ],
+  "bugs": {
+    "url": "https://github.com/itsjavi/react-router-fastify/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsjavi/react-router-fastify.git"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "node": {
+        "types": "./dist/index.d.mts",
+        "module-sync": "./dist/index.mjs"
+      },
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "postbuild": "pnpm dlx publint",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "pnpm typecheck",
+    "lint:circular": "pnpm dlx madge --circular src/index.ts src/cli.ts",
+    "prepublishOnly": "pnpm build",
+    "test": "vitest --run",
+    "test:coverage": "vitest --run --coverage",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@fastify/static": "^9.0.0",
+    "@remix-run/node-fetch-server": "^0.13.0",
+    "fastify": "^5.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@vitest/coverage-v8": "^4.1.2",
+    "node-cluster-serve": "^0.9.0",
+    "oxfmt": "^0.43.0",
+    "publint": "^0.3.18",
+    "react-router": "^7.14.0",
+    "tsdown": "^0.21.7",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  },
+  "peerDependencies": {
+    "node-cluster-serve": "^0.9.0",
+    "react-router": "^7"
+  }
+}

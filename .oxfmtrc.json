@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "semi": false,
+  "printWidth": 100,
+  "trailingComma": "all",
+  "tabWidth": 2,
+  "proseWrap": "always",
+  "singleQuote": true,
+  "arrowParens": "always",
+  "jsxSingleQuote": false,
+  "quoteProps": "as-needed",
+  "sortPackageJson": true,
+  "ignorePatterns": [
+    "LICENSE.md",
+    "build/",
+    "dist/",
+    "release/",
+    ".react-router/",
+    "node_modules/",
+    ".pnpm/",
+    ".pnpm-store/",
+    ".cache/",
+    "coverage/",
+    "generated/",
+    "public/",
+    "assets/",
+    "*.min.json",
+    ".ignore/",
+    ".local/",
+    "tmp/",
+    "pnpm-*.yaml"
+  ]
+}

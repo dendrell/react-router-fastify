@@ -1,0 +1,145 @@
+# react-router-fastify
+
+Fastify adapter for React Router server builds, designed to work with
+[`node-cluster-serve`](https://github.com/itsjavi/node-cluster-serve) (optionally).
+
+This package does not provide a Fastify dev server, it is only designed to wrap your React Router
+server build, optionally serving client build assets and static files as well.
+
+## Install
+
+```bash
+npm install react-router-fastify
+# or
+npx nypm add react-router-fastify
+```
+
+## What this package does
+
+- Creates a Fastify app that serves:
+  - files from `public/`
+  - optional client assets from `build/client/assets` and `build/client`
+  - React Router requests through `createRequestHandler`
+- Returns a runner function compatible with `node-cluster-serve`'s `runServerModule`.
+
+## Quick start
+
+Create a server module that default-exports a function returned by `createServerRunner`:
+
+```ts
+// ./server.ts
+import { createServerRunner } from 'react-router-fastify'
+
+const reactRouterServerBundleFile = './build/server/index.js'
+export default createServerRunner(reactRouterServerBundleFile, {
+  serveClientAssets: process.env.NODE_ENV !== 'production',
+  assetsMaxAge: '1y',
+  logRequests: true,
+  serverTimingHeader: true,
+  prepare: (app) => {
+    // app is a Fastify instance. Use this callback to register plugins/routes before `app.listen` is called.
+    app.get('/health', (req, res) => {
+      res.send('OK')
+    })
+  },
+})
+```
+
+Run it with `node-cluster-serve`:
+
+```bash
+node-cluster-serve ./server.ts --port 3000 --workerCount 4
+```
+
+Run it directly with Node (single process, no cluster runner):
+
+```ts
+// run-server.ts
+import { createServerRunner } from 'react-router-fastify'
+
+const run = createServerRunner('./build/server/index.js', {
+  serveClientAssets: true,
+  assetsMaxAge: '1y',
+  logRequests: true,
+  serverTimingHeader: true,
+})
+
+await run({
+  mode: (process.env.NODE_ENV as 'development' | 'production' | 'test') ?? 'production',
+  host: process.env.HOST ?? '0.0.0.0',
+  port: Number(process.env.PORT ?? 3000),
+})
+```
+
+```bash
+node ./run-server.ts
+```
+
+## API
+
+### `createServerRunner(serverBundleFile?, options)`
+
+```ts
+import type { FastifyInstance } from 'fastify'
+import type { ClosableServer, ServeOptions, ServerMode } from 'node-cluster-serve'
+
+type CreateAppOptions = {
+  serveClientAssets: boolean
+  assetsMaxAge?: string
+  logRequests?: boolean
+  serverTimingHeader?: boolean
+}
+
+type RunnerOptions = CreateAppOptions & {
+  prepare?: (app: FastifyInstance) => Promise<void>
+  mode?: ServerMode
+  port?: number
+  host?: string
+}
+
+declare function createServerRunner(
+  serverBundleFile?: string | URL,
+  options: RunnerOptions,
+): (serveOptions: ServeOptions) => Promise<ClosableServer>
+```
+
+- `serverBundleFile`:
+  - path or `file:` URL to your React Router server build module
+  - default: `./build/server/index.js`
+  - string paths are resolved from `process.cwd()`
+- `options.serveClientAssets`:
+  - if `true`, serves `/assets/*` from `build/client/assets` with immutable cache headers
+  - also allows fallback serving from `build/client`
+- `options.assetsMaxAge`:
+  - cache max-age for `/assets/*` (default `1y`)
+- `options.logRequests`:
+  - when `true`, logs request method, pathname, status, and elapsed time in `onResponse` hook
+  - default: `false`
+- `options.serverTimingHeader`:
+  - when `true`, sets `Server-Timing: total;dur=<ms>` on React Router handler responses
+  - default: `false`
+- `options.prepare(app)`:
+  - hook to register plugins/routes before calling `listen`
+- `options.mode`, `options.port`, `options.host`:
+  - optional overrides for `serveOptions.mode`, `serveOptions.port`, `serveOptions.host`
+  - useful when you want fixed values regardless of runner-provided options
+
+## Static files behavior
+
+Request handling order:
+
+1. Serve from `public/` when file exists.
+2. If `serveClientAssets` is enabled, serve `/assets/*` from `build/client/assets`.
+3. If `serveClientAssets` is enabled, attempt fallback from `build/client`.
+4. Otherwise forward request to React Router handler.
+
+Path traversal-like input is normalized and constrained to remain inside each static root.
+
+## Notes
+
+- `createServerRunner` does not start cluster processes itself; use it with `node-cluster-serve`.
+- The server build module is imported dynamically at runtime.
+
+## License
+
+MIT
