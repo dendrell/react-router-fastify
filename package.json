@@ -43,13 +43,15 @@
     }
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && pnpm --filter demo build",
     "postbuild": "pnpm dlx publint",
+    "dev": "pnpm --filter demo dev",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "pnpm typecheck",
     "lint:circular": "pnpm dlx madge --circular src/index.ts src/cli.ts",
     "prepublishOnly": "pnpm build",
+    "start": "pnpm --filter demo start:cluster",
     "test": "vitest --run",
     "test:coverage": "vitest --run --coverage",
     "typecheck": "tsc"
