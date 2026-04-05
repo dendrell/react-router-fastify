@@ -6,8 +6,7 @@ import type { ServeFunction, ServerMode } from 'node-cluster-serve'
 import { stat } from 'node:fs/promises'
 import type { IncomingMessage } from 'node:http'
 import path from 'node:path'
-import type { ServerBuild } from 'react-router'
-import { createRequestHandler as createRemixRequestHandler } from 'react-router'
+import { createRequestHandler as createRemixRequestHandler, type ServerBuild } from 'react-router'
 import {
   getPathnameWithinPublicPath,
   normalizePublicPath,
@@ -15,58 +14,20 @@ import {
   resolveServerBuildFileUrl,
 } from './path-utils.ts'
 
-type MaybePromise<T> = T | Promise<T>
-type ContextType = Parameters<ReturnType<typeof createRemixRequestHandler>>[1]
-
-type GetLoadContextFunction = (
-  request: FastifyRequest,
-  reply: FastifyReply,
-) => MaybePromise<ContextType>
-
-type RequestHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>
-
-function createRequestHandler({
-  build,
-  getLoadContext,
-  mode = process.env.NODE_ENV,
-  serverTimingHeader = false,
-}: {
-  build: ServerBuild | (() => Promise<ServerBuild>)
-  getLoadContext?: GetLoadContextFunction
-  mode?: string
+type CreateFastifyAppOptions = {
+  serveClientAssets: boolean
+  assetsMaxAge?: string
+  logRequests?: boolean
   serverTimingHeader?: boolean
-}): RequestHandler {
-  let handleRequest = createRemixRequestHandler(build, mode)
-
-  return async (request, reply) => {
-    let startedAt = Date.now()
-    reply.hijack()
-
-    try {
-      let nodeRequest = createRequest(request.raw, reply.raw)
-      let loadContext = await getLoadContext?.(request, reply)
-      let response = await handleRequest(nodeRequest, loadContext)
-
-      if (serverTimingHeader) {
-        let duration = Date.now() - startedAt
-        response.headers.set('Server-Timing', `total;dur=${duration}`)
-      }
-
-      await sendResponse(reply.raw, response)
-    } catch (error) {
-      if (!reply.raw.writableEnded) {
-        if (!reply.raw.headersSent) {
-          reply.raw.statusCode = 500
-          reply.raw.setHeader('content-type', 'text/plain; charset=utf-8')
-          reply.raw.end('Internal Server Error')
-        } else {
-          reply.raw.end()
-        }
-      }
-      throw error
-    }
-  }
+  bodySizeLimit?: number
 }
+type CreateServerRunnerOptions = CreateFastifyAppOptions & {
+  prepare?: (app: FastifyInstance) => Promise<void>
+  mode?: ServerMode
+  port?: number
+  host?: string
+}
+type RequestHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>
 
 async function fileExists(root: string, pathname: string) {
   let filePath = path.join(root, pathname)
@@ -75,6 +36,10 @@ async function fileExists(root: string, pathname: string) {
   } catch {
     return false
   }
+}
+
+function getPathname(request: FastifyRequest) {
+  return new URL(request.raw.url ?? request.url, 'http://localhost').pathname
 }
 
 async function maybeServeStaticFile(
@@ -102,43 +67,101 @@ async function maybeServeStaticFile(
   return true
 }
 
-function getPathname(request: FastifyRequest) {
-  return new URL(request.raw.url ?? request.url, 'http://localhost').pathname
+function createBufferedRequest(req: FastifyRequest, reply: FastifyReply) {
+  let body = req.body
+  let webRequest = createRequest(req.raw, reply.raw)
+
+  if (
+    body == null ||
+    (typeof body !== 'string' && !(body instanceof Uint8Array) && !(body instanceof ArrayBuffer))
+  ) {
+    return webRequest
+  }
+
+  return new Request(webRequest.url, {
+    method: webRequest.method,
+    headers: webRequest.headers,
+    body,
+  })
 }
 
-type CreateAppOptions = {
-  serveClientAssets: boolean
-  assetsMaxAge?: string
-  logRequests?: boolean
-  serverTimingHeader?: boolean
+function createRequestHandler({
+  build,
+  mode = process.env.NODE_ENV,
+}: {
+  build: ServerBuild | (() => Promise<ServerBuild>)
+  mode?: string
+}): RequestHandler {
+  const handleRemixRequest = createRemixRequestHandler(build, mode)
+
+  return async (req, reply) => {
+    reply.hijack()
+    try {
+      const webRequest = createBufferedRequest(req, reply)
+      const webResponse = await handleRemixRequest(webRequest)
+      await sendResponse(reply.raw, webResponse)
+    } catch (error) {
+      if (!reply.raw.writableEnded) {
+        if (!reply.raw.headersSent) {
+          reply.raw.statusCode = 500
+          reply.raw.setHeader('content-type', 'text/plain; charset=utf-8')
+          reply.raw.end('Internal Server Error')
+        } else {
+          reply.raw.end()
+        }
+      }
+      throw error
+    }
+  }
 }
 
-async function createApp(
-  getHandler: () => Promise<RequestHandler>,
+const DEFAULT_BODY_SIZE_LIMIT = 1024 * 1024 * 4 // 4MB
+
+async function createFastifyApp(
+  handleRequest: RequestHandler,
   build: ServerBuild,
-  options: CreateAppOptions,
+  options: CreateFastifyAppOptions,
 ) {
+  const bodySizeLimit = options.bodySizeLimit ?? DEFAULT_BODY_SIZE_LIMIT
   const staticRoot = path.resolve(build.assetsBuildDirectory)
   const publicPath = normalizePublicPath(build.publicPath)
-  const requestStartedAt = new WeakMap<IncomingMessage, number>()
+  const requestTimeMap = new WeakMap<IncomingMessage, number>()
+  const timingEnabled = options.serverTimingHeader || options.logRequests
 
   const app = fastify()
 
-  await app.register(fastifyStatic, {
+  // Buffer urlencoded payloads so React Router can parse them via `request.formData()`.
+  app.addContentTypeParser(
+    ['application/x-www-form-urlencoded', 'multipart/form-data'],
+    { parseAs: 'buffer', bodyLimit: bodySizeLimit },
+    async (_request: FastifyRequest, payload: Buffer) => payload,
+  )
+
+  app.register(fastifyStatic, {
     root: staticRoot,
     serve: false,
   })
 
   if (options.logRequests) {
     app.addHook('onRequest', async (request) => {
-      requestStartedAt.set(request.raw, performance.now())
+      if (timingEnabled) {
+        requestTimeMap.set(request.raw, performance.now())
+      }
     })
 
     app.addHook('onResponse', async (request, reply) => {
-      let startedAt = requestStartedAt.get(request.raw) ?? performance.now()
-      let elapsedMs = (performance.now() - startedAt).toFixed(2)
-      let pathname = new URL(request.raw.url ?? request.url, 'http://localhost').pathname
-      console.log(`${request.method} ${pathname} ${reply.statusCode} - ${elapsedMs} ms`)
+      if (timingEnabled) {
+        const startedAt = requestTimeMap.get(request.raw)
+        const elapsedMs = startedAt ? (performance.now() - startedAt).toFixed(2) : -1
+        if (options.serverTimingHeader) {
+          reply.raw.setHeader('Server-Timing', `total;dur=${elapsedMs}`)
+        }
+        if (options.logRequests) {
+          const pathname = getPathname(request)
+          console.log(`${request.method} ${pathname} ${reply.statusCode} - ${elapsedMs} ms`)
+        }
+        requestTimeMap.delete(request.raw)
+      }
     })
   }
 
@@ -162,8 +185,7 @@ async function createApp(
       }
     }
 
-    const handler = await getHandler()
-    await handler(request, reply)
+    await handleRequest(request, reply)
   })
 
   return app
@@ -171,12 +193,7 @@ async function createApp(
 
 export function createServerRunner(
   serverBundleFile: string | URL = './build/server/index.js',
-  options: CreateAppOptions & {
-    prepare?: (app: FastifyInstance) => Promise<void>
-    mode?: ServerMode
-    port?: number
-    host?: string
-  },
+  options: CreateServerRunnerOptions,
 ): ServeFunction {
   return async (serveOptions) => {
     const serverMode = options.mode ?? serveOptions.mode
@@ -188,11 +205,10 @@ export function createServerRunner(
     const handleRequest = createRequestHandler({
       build,
       mode: serverMode,
-      serverTimingHeader: options.serverTimingHeader,
     })
 
     const { prepare, ...appOptions } = options
-    const app = await createApp(async () => handleRequest, build, appOptions)
+    const app = await createFastifyApp(handleRequest, build, appOptions)
     await prepare?.(app)
     await app.listen({
       port: serverPort,
