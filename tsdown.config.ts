@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const entry = ['src/index.ts']
+const entry = ['src/index.ts', 'src/fastify-fetch-plugin.ts']
 
 export default defineConfig([
   {

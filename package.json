@@ -30,6 +30,16 @@
         "types": "./dist/index.d.mts",
         "default": "./dist/index.mjs"
       }
+    },
+    "./fastify-fetch-plugin": {
+      "node": {
+        "types": "./dist/fastify-fetch-plugin.d.mts",
+        "module-sync": "./dist/fastify-fetch-plugin.mjs"
+      },
+      "import": {
+        "types": "./dist/fastify-fetch-plugin.d.mts",
+        "default": "./dist/fastify-fetch-plugin.mjs"
+      }
     }
   },
   "scripts": {
@@ -46,8 +56,8 @@
   },
   "dependencies": {
     "@fastify/static": "^9.0.0",
-    "@remix-run/node-fetch-server": "^0.13.0",
-    "fastify": "^5.8.4"
+    "fastify": "^5.8.4",
+    "fastify-plugin": "^5.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",

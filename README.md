@@ -1,47 +1,41 @@
 # react-router-fastify
 
-Fastify adapter for React Router server builds, designed to work with
-[`node-cluster-serve`](https://github.com/itsjavi/node-cluster-serve) (optionally).
+Fastify adapter for React Router server builds.
 
-This package does not provide a Fastify dev server, it is only designed to wrap your React Router
-server build, optionally serving client build assets and static files as well.
+It wraps a React Router server build with a Fastify app, optionally serves the built client files,
+and returns a runner function that works with
+[`node-cluster-serve`](https://github.com/itsjavi/node-cluster-serve) or direct startup code.
+
+This package is for production-style server builds. It is not a Fastify development server.
 
 ## Install
 
 ```bash
-npm install react-router-fastify
-# or
-npx nypm add react-router-fastify
+pnpm add react-router-fastify fastify react-router
 ```
 
-## What this package does
+If you use the cluster runner:
 
-- Creates a Fastify app that serves:
-  - optional client/static files from your React Router server build metadata:
-    - URL base from `build.publicPath`
-    - filesystem root from `build.assetsBuildDirectory`
-  - `/assets/*` files with immutable cache headers
-  - React Router requests through `createRequestHandler` + `@remix-run/node-fetch-server`
-- Returns a runner function compatible with `node-cluster-serve`'s `runServerModule`.
+```bash
+pnpm add node-cluster-serve
+```
 
 ## Quick start
 
-Create a server module that default-exports a function returned by `createServerRunner`:
-
 ```ts
-// ./server.ts
+// server.ts
 import { createServerRunner } from 'react-router-fastify'
 
-const reactRouterServerBundleFile = './build/server/index.js'
-export default createServerRunner(reactRouterServerBundleFile, {
-  serveClientAssets: process.env.NODE_ENV !== 'production',
-  assetsMaxAge: '1y',
+export default createServerRunner(new URL('./build/server/index.js', import.meta.url), {
+  serveClientAssets: true,
+  assetMaxAge: '1y',
+  publicFileMaxAge: '1h',
   logRequests: true,
   serverTimingHeader: true,
-  prepare: (app) => {
-    // app is a Fastify instance. Use this callback to register plugins/routes before `app.listen` is called.
-    app.get('/health', (req, res) => {
-      res.send('OK')
+  origin: process.env.PUBLIC_ORIGIN,
+  prepare: async (app) => {
+    app.get('/api/hello', async () => {
+      return { message: 'Hello World' }
     })
   },
 })
@@ -53,28 +47,20 @@ Run it with `node-cluster-serve`:
 node-cluster-serve ./server.ts --port 3000 --workerCount 4
 ```
 
-Run it directly with Node (single process, no cluster runner):
+Or run it directly:
 
 ```ts
-// run-server.ts
 import { createServerRunner } from 'react-router-fastify'
 
-const run = createServerRunner('./build/server/index.js', {
+let run = createServerRunner('./build/server/index.js', {
   serveClientAssets: true,
-  assetsMaxAge: '1y',
-  logRequests: true,
-  serverTimingHeader: true,
 })
 
 await run({
-  mode: (process.env.NODE_ENV as 'development' | 'production' | 'test') ?? 'production',
+  mode: 'production',
   host: process.env.HOST ?? '0.0.0.0',
   port: Number(process.env.PORT ?? 3000),
 })
-```
-
-```bash
-node ./run-server.ts
 ```
 
 ## API
@@ -85,70 +71,83 @@ node ./run-server.ts
 import type { FastifyInstance } from 'fastify'
 import type { ServeFunction, ServerMode } from 'node-cluster-serve'
 
-type CreateAppOptions = {
+type CreateServerRunnerOptions = {
   serveClientAssets: boolean
-  assetsMaxAge?: string
+  assetMaxAge?: string
+  publicFileMaxAge?: string
   logRequests?: boolean
   serverTimingHeader?: boolean
-  bodySizeLimit?: number
-}
-
-type RunnerOptions = CreateAppOptions & {
   prepare?: (app: FastifyInstance) => Promise<void>
   mode?: ServerMode
   port?: number
   host?: string
+  origin?: string | URL
 }
 
 declare function createServerRunner(
   serverBundleFile?: string | URL,
-  options: RunnerOptions,
+  options: CreateServerRunnerOptions,
 ): ServeFunction
 ```
 
-- `serverBundleFile`:
-  - path or `file:` URL to your React Router server build module
-  - default: `./build/server/index.js`
-  - string paths are resolved from `process.cwd()`
-- `options.serveClientAssets`:
-  - if `true`, serves static files from `build.assetsBuildDirectory`
-  - static routing is scoped under `build.publicPath`
-  - requests under `<publicPath>/assets/*` use immutable cache headers
-- `options.assetsMaxAge`:
-  - cache max-age for `/assets/*` (default `1y`)
-- `options.logRequests`:
-  - when `true`, logs request method, pathname, status, and elapsed time in `onResponse` hook
-  - default: `false`
-- `options.serverTimingHeader`:
-  - when `true`, sets `Server-Timing: total;dur=<ms>` in the `onResponse` hook
-  - independent of request logging (`logRequests`)
-  - default: `false`
-- `options.bodySizeLimit`:
-  - max buffered body size (bytes) for `application/x-www-form-urlencoded` and `multipart/form-data`
-  - default: `4194304` (`4MB`)
-- `options.prepare(app)`:
-  - hook to register plugins/routes before calling `listen`
-- `options.mode`, `options.port`, `options.host`:
-  - optional overrides for `serveOptions.mode`, `serveOptions.port`, `serveOptions.host`
-  - useful when you want fixed values regardless of runner-provided options
+`serverBundleFile`
 
-## Static files behavior
+- Path or `file:` URL to the React Router server build module.
+- Defaults to `./build/server/index.js`.
+- String paths are resolved from `process.cwd()`.
 
-Request handling order:
+`options.serveClientAssets`
 
-1. If `serveClientAssets` is enabled and the request is under `build.publicPath`, try serving from
-   `build.assetsBuildDirectory`.
-2. Requests under `<publicPath>/assets/*` are served with immutable cache headers.
-3. Otherwise forward request to React Router handler.
+- Enables static file serving from `build.assetsBuildDirectory`.
+- Static URLs are scoped to `build.publicPath`.
+- Requests under `<publicPath>/assets/*` get immutable cache headers.
 
-Path traversal-like input is normalized and constrained to remain inside each static root.
+`options.assetMaxAge`
+
+- Cache age for files under `<publicPath>/assets/*`.
+- Defaults to `1y`.
+
+`options.publicFileMaxAge`
+
+- Cache age for other files served from `build.assetsBuildDirectory`.
+- Defaults to `1h`.
+
+`options.logRequests`
+
+- Logs `METHOD pathname status - duration ms` in an `onSend` hook.
+
+`options.serverTimingHeader`
+
+- Adds `Server-Timing: total;dur=<ms>` in an `onSend` hook.
+
+`options.prepare(app)`
+
+- Async hook for registering plugins, hooks, or routes before `listen()`.
+
+`options.mode`, `options.port`, `options.host`
+
+- Optional overrides for values normally provided by the runner.
+
+`options.origin`
+
+- Canonical origin used to build the Web `Request` passed to React Router.
+- Useful behind proxies, TLS termination, or any deployment where the bound listen address is not
+  the public origin.
+- If omitted, the adapter falls back to the resolved `host` and `port`.
+
+## Behavior
+
+- React Router requests are passed through as standard Web `Request` objects.
+- React Router `Response` bodies are streamed back through Fastify.
+- Static file paths are normalized and constrained to stay inside the configured asset root.
+- Missing static files fall through to the React Router request handler.
 
 ## Notes
 
-- `createServerRunner` does not start cluster processes itself; use it with `node-cluster-serve`.
+- `createServerRunner` does not manage worker processes itself.
 - The server build module is imported dynamically at runtime.
-- The adapter buffers `application/x-www-form-urlencoded` and `multipart/form-data` payloads so
-  React Router can consume them through the Web `Request` APIs.
+- When deploying behind a reverse proxy, set `origin` to the public URL you want route handlers to
+  see.
 
 ## License
 

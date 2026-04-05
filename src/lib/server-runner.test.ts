@@ -1,82 +1,17 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import type { FastifyInstance } from 'fastify'
+import type { ServeOptions } from 'node-cluster-serve'
 import os from 'node:os'
 import path from 'node:path'
-import type { ServeOptions } from 'node-cluster-serve'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mockState = vi.hoisted(() => {
-  const app = {
-    addContentTypeParser: vi.fn(),
-    register: vi.fn(async () => undefined),
-    addHook: vi.fn(),
-    all: vi.fn(),
-    listen: vi.fn(async () => undefined),
-  }
-  const fastifyFactory = vi.fn(() => app)
-  const createRemixRequestHandler = vi.fn(() =>
-    vi.fn(async (_request?: Request) => new Response('ok')),
-  )
-  const createRequest = vi.fn((req: any, _rawReply: any) => createRequestFromNodeRequest(req))
-  const sendResponse = vi.fn(async (rawReply: any, response: Response | undefined) => {
-    response?.headers.forEach((value, key) => {
-      rawReply.setHeader?.(key, value)
-    })
-    rawReply.statusCode = response?.status ?? 200
-    rawReply.headersSent = true
-    rawReply.writableEnded = true
-    await rawReply.end?.()
-  })
-
-  function createRequestFromNodeRequest(req: any) {
-    let method = req?.method ?? 'GET'
-    let host = req?.headers?.host ?? 'localhost'
-    let url = `http://${host}${req?.url ?? '/'}`
-    let headers = new Headers(req?.headers ?? {})
-    let body: string | undefined
-    if (typeof req?.body === 'string') {
-      body = req.body
-    } else if (
-      req?.body &&
-      typeof req.body === 'object' &&
-      headers.get('content-type')?.includes('application/x-www-form-urlencoded')
-    ) {
-      body = new URLSearchParams(req.body as Record<string, string>).toString()
-    }
-
-    return new Request(url, {
-      method,
-      headers,
-      body: method === 'GET' || method === 'HEAD' ? undefined : body,
-    })
-  }
-
-  const staticPlugin = {}
-  return {
-    app,
-    fastifyFactory,
-    createRemixRequestHandler,
-    createRequest,
-    sendResponse,
-    staticPlugin,
-  }
-})
-
-vi.mock('fastify', () => ({
-  default: mockState.fastifyFactory,
+const mockState = vi.hoisted(() => ({
+  createRemixRequestHandler: vi.fn(() => vi.fn(async () => new Response('router response'))),
 }))
 
 vi.mock('react-router', () => ({
   createRequestHandler: mockState.createRemixRequestHandler,
-}))
-
-vi.mock('@remix-run/node-fetch-server', () => ({
-  createRequest: mockState.createRequest,
-  sendResponse: mockState.sendResponse,
-}))
-
-vi.mock('@fastify/static', () => ({
-  default: mockState.staticPlugin,
 }))
 
 import { createServerRunner } from './server-runner.ts'
@@ -86,657 +21,256 @@ type TempModule = {
   filePath: string
 }
 
-function firstCall(mockFn: { mock: { calls: unknown[][] } }) {
-  return mockFn.mock.calls[0] ?? []
-}
-
-async function createTempServerBuildModule(fileName = 'server-build.mjs'): Promise<TempModule> {
+async function createTempServerBuildModule(
+  options: {
+    publicPath?: string
+    files?: Record<string, string>
+  } = {},
+): Promise<TempModule> {
   let dir = await mkdtemp(path.join(os.tmpdir(), 'rrf-runner-'))
-  let filePath = path.join(dir, fileName)
-  await mkdir(path.dirname(filePath), { recursive: true })
+  let clientDir = path.join(dir, 'client')
+  let files = options.files ?? {}
+
+  await Promise.all(
+    Object.entries(files).map(async ([relativePath, contents]) => {
+      let filePath = path.join(clientDir, relativePath)
+      await mkdir(path.dirname(filePath), { recursive: true })
+      await writeFile(filePath, contents, 'utf8')
+    }),
+  )
+
+  let filePath = path.join(dir, 'server-build.mjs')
   await writeFile(
     filePath,
-    "export const publicPath = '/'\nexport const assetsBuildDirectory = './build/client'\nexport default { marker: 'runner-build' }\n",
+    [
+      `export const publicPath = ${JSON.stringify(options.publicPath ?? '/')}`,
+      `export const assetsBuildDirectory = ${JSON.stringify(clientDir)}`,
+      "export default { marker: 'runner-build' }",
+      '',
+    ].join('\n'),
     'utf8',
   )
+
   return { dir, filePath }
 }
 
-describe('createServerRunner startup wiring', () => {
+describe('createServerRunner', () => {
   let tempDirs: string[] = []
-  let originalCwd = process.cwd()
+  let apps: FastifyInstance[] = []
 
   beforeEach(() => {
-    mockState.fastifyFactory.mockClear()
-    mockState.createRemixRequestHandler.mockClear()
-    mockState.createRequest.mockClear()
-    mockState.sendResponse.mockClear()
-    mockState.app.addContentTypeParser.mockClear()
-    mockState.app.register.mockClear()
-    mockState.app.addHook.mockClear()
-    mockState.app.all.mockClear()
-    mockState.app.listen.mockClear()
+    mockState.createRemixRequestHandler.mockReset()
+    mockState.createRemixRequestHandler.mockImplementation(() =>
+      vi.fn(async () => new Response('router response')),
+    )
   })
 
   afterEach(async () => {
-    process.chdir(originalCwd)
+    await Promise.all(apps.map((app) => app.close()))
     await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })))
+    apps = []
     tempDirs = []
+    vi.restoreAllMocks()
   })
 
-  it('imports build module, creates handler, runs onBeforeStart, then listens', async () => {
+  it('imports the build, runs prepare, and returns a working Fastify instance', async () => {
     let temp = await createTempServerBuildModule()
     tempDirs.push(temp.dir)
 
-    let onBeforeStart = vi.fn(async () => undefined)
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: true,
-      prepare: onBeforeStart,
-    })
-
-    let returnedApp = await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4310,
-    } as ServeOptions)
-
-    expect(returnedApp).toBe(mockState.app)
-    expect(mockState.fastifyFactory).toHaveBeenCalledTimes(1)
-    expect(mockState.app.addContentTypeParser).toHaveBeenCalledWith(
-      ['application/x-www-form-urlencoded', 'multipart/form-data'],
-      { parseAs: 'buffer', bodyLimit: 1024 * 1024 * 4 },
-      expect.any(Function),
-    )
-    expect(mockState.app.register).toHaveBeenNthCalledWith(1, mockState.staticPlugin, {
-      root: path.resolve('build/client'),
-      serve: false,
-    })
-    expect(mockState.createRemixRequestHandler).toHaveBeenCalledTimes(1)
-    expect(firstCall(mockState.createRemixRequestHandler)[0]).toMatchObject({
-      default: { marker: 'runner-build' },
-    })
-    expect(firstCall(mockState.createRemixRequestHandler)[1]).toBe('production')
-    expect(onBeforeStart).toHaveBeenCalledWith(mockState.app)
-    expect(onBeforeStart.mock.invocationCallOrder[0]).toBeLessThan(
-      mockState.app.listen.mock.invocationCallOrder[0],
-    )
-    expect(mockState.app.listen).toHaveBeenCalledWith({ host: '127.0.0.1', port: 4310 })
-  })
-
-  it('does not register request logging hooks by default', async () => {
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
+    let prepared = false
     let run = createServerRunner(pathToFileURL(temp.filePath), {
       serveClientAssets: false,
+      prepare: async (app) => {
+        prepared = true
+        app.get('/health', async () => 'ok')
+      },
     })
 
-    await run({
+    let app = (await run({
       mode: 'production',
-      host: '127.0.0.1',
-      port: 4312,
-    } as ServeOptions)
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
 
-    expect(mockState.app.addHook).not.toHaveBeenCalled()
+    let response = await app.inject({
+      method: 'GET',
+      url: '/health',
+    })
+
+    expect(prepared).toBe(true)
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toBe('ok')
+    expect(mockState.createRemixRequestHandler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        default: { marker: 'runner-build' },
+      }),
+      'production',
+    )
   })
 
-  it('registers request logging hooks when logRequests is enabled', async () => {
+  it('uses the resolved host and port as the request origin by default', async () => {
+    let capturedRequest: Request | undefined
+    mockState.createRemixRequestHandler.mockImplementationOnce(
+      () =>
+        vi.fn(async (request: Request) => {
+          capturedRequest = request
+          return new Response('ok')
+        }) as any,
+    )
+
     let temp = await createTempServerBuildModule()
     tempDirs.push(temp.dir)
 
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
+    let app = (await createServerRunner(pathToFileURL(temp.filePath), {
+      serveClientAssets: false,
+    })({
+      mode: 'production',
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
+
+    await app.inject({
+      method: 'GET',
+      url: '/resource?x=1',
+    })
+
+    expect(capturedRequest?.url).toBe('http://localhost:0/resource?x=1')
+  })
+
+  it('prefers an explicit origin over the resolved listen address', async () => {
+    let capturedRequest: Request | undefined
+    mockState.createRemixRequestHandler.mockImplementationOnce(
+      () =>
+        vi.fn(async (request: Request) => {
+          capturedRequest = request
+          return new Response('ok')
+        }) as any,
+    )
+
+    let temp = await createTempServerBuildModule()
+    tempDirs.push(temp.dir)
+
+    let app = (await createServerRunner(pathToFileURL(temp.filePath), {
+      serveClientAssets: false,
+      origin: 'https://app.example.com',
+    })({
+      mode: 'production',
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
+
+    await app.inject({
+      method: 'GET',
+      url: '/resource?x=1',
+    })
+
+    expect(capturedRequest?.url).toBe('https://app.example.com/resource?x=1')
+  })
+
+  it('serves static assets under the public path and falls through on misses', async () => {
+    let temp = await createTempServerBuildModule({
+      publicPath: '/public/',
+      files: {
+        'assets/app.js': 'console.log("hello")',
+        'favicon.ico': 'icon',
+      },
+    })
+    tempDirs.push(temp.dir)
+
+    let app = (await createServerRunner(pathToFileURL(temp.filePath), {
+      serveClientAssets: true,
+    })({
+      mode: 'production',
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
+
+    let assetResponse = await app.inject({
+      method: 'GET',
+      url: '/public/assets/app.js',
+    })
+    let publicFileResponse = await app.inject({
+      method: 'GET',
+      url: '/public/favicon.ico',
+    })
+    let fallbackResponse = await app.inject({
+      method: 'GET',
+      url: '/public/missing.txt',
+    })
+
+    expect(assetResponse.statusCode).toBe(200)
+    expect(assetResponse.body).toBe('console.log("hello")')
+    expect(assetResponse.headers['cache-control']).toContain('immutable')
+    expect(assetResponse.headers['cache-control']).toContain('max-age=31536000')
+    expect(publicFileResponse.statusCode).toBe(200)
+    expect(publicFileResponse.body).toBe('icon')
+    expect(publicFileResponse.headers['cache-control']).toContain('max-age=3600')
+    expect(fallbackResponse.statusCode).toBe(200)
+    expect(fallbackResponse.body).toBe('router response')
+  })
+
+  it('allows overriding cache ages for assets and public files', async () => {
+    let temp = await createTempServerBuildModule({
+      publicPath: '/public/',
+      files: {
+        'assets/app.js': 'console.log("hello")',
+        'favicon.ico': 'icon',
+      },
+    })
+    tempDirs.push(temp.dir)
+
+    let app = (await createServerRunner(pathToFileURL(temp.filePath), {
+      serveClientAssets: true,
+      assetMaxAge: '30d',
+      publicFileMaxAge: '10m',
+    })({
+      mode: 'production',
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
+
+    let assetResponse = await app.inject({
+      method: 'GET',
+      url: '/public/assets/app.js',
+    })
+    let publicFileResponse = await app.inject({
+      method: 'GET',
+      url: '/public/favicon.ico',
+    })
+
+    expect(assetResponse.headers['cache-control']).toContain('max-age=2592000')
+    expect(publicFileResponse.headers['cache-control']).toContain('max-age=600')
+  })
+
+  it('adds request timing and request logs when enabled', async () => {
+    let consoleLog = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    let temp = await createTempServerBuildModule()
+    tempDirs.push(temp.dir)
+
+    let app = (await createServerRunner(pathToFileURL(temp.filePath), {
       serveClientAssets: false,
       logRequests: true,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4313,
-    } as ServeOptions)
-
-    expect(mockState.app.addHook).toHaveBeenCalledTimes(2)
-    let hookCalls = mockState.app.addHook.mock.calls as unknown[][]
-    expect((hookCalls[0] ?? [])[0]).toBe('onRequest')
-    expect((hookCalls[1] ?? [])[0]).toBe('onResponse')
-  })
-
-  it('registers timing hooks and sets Server-Timing when serverTimingHeader is enabled', async () => {
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
       serverTimingHeader: true,
-    })
-
-    await run({
+    })({
       mode: 'production',
-      host: '127.0.0.1',
-      port: 4319,
-    } as ServeOptions)
+      host: 'localhost',
+      port: 0,
+    } as ServeOptions)) as FastifyInstance
+    apps.push(app)
 
-    expect(mockState.app.addHook).toHaveBeenCalledTimes(2)
-    let hookCalls = mockState.app.addHook.mock.calls as unknown[][]
-    let onRequest = hookCalls.find((call) => call[0] === 'onRequest')?.[1] as
-      | ((request: any) => Promise<void>)
-      | undefined
-    let onResponse = hookCalls.find((call) => call[0] === 'onResponse')?.[1] as
-      | ((request: any, reply: any) => Promise<void>)
-      | undefined
-    expect(onRequest).toBeTypeOf('function')
-    expect(onResponse).toBeTypeOf('function')
-
-    let raw = {
-      url: '/resource',
-      setHeader: vi.fn(),
-    }
-    let request = {
-      raw,
-      url: '/resource',
+    let response = await app.inject({
       method: 'GET',
-    }
-    let reply = {
-      raw,
-      statusCode: 200,
-    }
-
-    await onRequest?.(request)
-    await onResponse?.(request, reply)
-
-    expect(raw.setHeader).toHaveBeenCalledWith(
-      'Server-Timing',
-      expect.stringMatching(/^total;dur=/),
-    )
-  })
-
-  it('resolves relative serverBuildFile from process.cwd()', async () => {
-    let temp = await createTempServerBuildModule(path.join('build', 'server', 'index.mjs'))
-    tempDirs.push(temp.dir)
-    process.chdir(temp.dir)
-
-    let run = createServerRunner('./build/server/index.mjs', {
-      serveClientAssets: false,
+      url: '/timed',
     })
 
-    await run({
-      mode: 'development',
-      host: '127.0.0.1',
-      port: 4311,
-    } as ServeOptions)
-
-    expect(mockState.createRemixRequestHandler).toHaveBeenCalledTimes(1)
-    let buildArg = firstCall(mockState.createRemixRequestHandler)[0] as {
-      default: unknown
-    }
-    expect(buildArg.default).toMatchObject({ marker: 'runner-build' })
-
-    let expectedUrl = pathToFileURL(path.join(temp.dir, 'build', 'server', 'index.mjs')).href
-    expect(fileURLToPath(expectedUrl)).toBe(path.join(temp.dir, 'build', 'server', 'index.mjs'))
-  })
-
-  it('forwards buffered form bodies to the remix request handler', async () => {
-    let capturedRequest: Request | undefined
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async (request?: Request) => {
-        capturedRequest = request
-        return new Response('ok')
-      }),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4317,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'POST',
-      headers: {
-        host: 'localhost:3000',
-        'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      },
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-      socket: { encrypted: false },
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await wildcardHandler?.(
-      {
-        raw,
-        url: '/resource',
-        method: 'POST',
-        headers: {
-          host: 'localhost:3000',
-          'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        },
-        body: Buffer.from('intent=reroll-catch-challenge'),
-      },
-      reply,
-    )
-
-    expect(mockState.createRequest).toHaveBeenCalledTimes(1)
-    expect(mockState.sendResponse).toHaveBeenCalledTimes(1)
-    expect(capturedRequest).toBeDefined()
-    expect((await capturedRequest?.formData())?.get('intent')).toBe('reroll-catch-challenge')
-  })
-
-  it('forwards buffered multipart form bodies to the remix request handler', async () => {
-    let capturedRequest: Request | undefined
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async (request?: Request) => {
-        capturedRequest = request
-        return new Response('ok')
-      }),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4319,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let boundary = '----rrf-boundary'
-    let multipartBody = Buffer.from(
-      [
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="intent"',
-        '',
-        'reroll-catch-challenge',
-        `--${boundary}--`,
-        '',
-      ].join('\r\n'),
-    )
-
-    let raw = {
-      url: '/resource',
-      method: 'POST',
-      headers: {
-        host: 'localhost:3000',
-        'content-type': `multipart/form-data; boundary=${boundary}`,
-      },
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-      socket: { encrypted: false },
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await wildcardHandler?.(
-      {
-        raw,
-        url: '/resource',
-        method: 'POST',
-        headers: raw.headers,
-        body: multipartBody,
-      },
-      reply,
-    )
-
-    expect(mockState.createRequest).toHaveBeenCalledTimes(1)
-    expect(mockState.sendResponse).toHaveBeenCalledTimes(1)
-    expect(capturedRequest).toBeDefined()
-    expect((await capturedRequest?.formData())?.get('intent')).toBe('reroll-catch-challenge')
-  })
-
-  it('uses node-fetch-server createRequest for non-buffered requests', async () => {
-    let capturedRequest: Request | undefined
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async (request?: Request) => {
-        capturedRequest = request
-        return new Response('ok')
-      }),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4318,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'POST',
-      headers: {
-        host: 'localhost:3000',
-        'content-type': 'application/json',
-      },
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-      socket: { encrypted: false },
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await wildcardHandler?.(
-      {
-        raw,
-        url: '/resource',
-        method: 'POST',
-        headers: {
-          host: 'localhost:3000',
-          'content-type': 'application/json',
-        },
-      },
-      reply,
-    )
-
-    expect(mockState.createRequest).toHaveBeenCalledTimes(1)
-    expect(mockState.sendResponse).toHaveBeenCalledTimes(1)
-    expect(capturedRequest).toBeDefined()
-  })
-
-  it('passes through text/plain requests via node-fetch-server createRequest', async () => {
-    let capturedRequest: Request | undefined
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async (request?: Request) => {
-        capturedRequest = request
-        return new Response('ok')
-      }),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4320,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'POST',
-      headers: {
-        host: 'localhost:3000',
-        'content-type': 'text/plain;charset=UTF-8',
-      },
-      body: 'hello world',
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-      socket: { encrypted: false },
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await wildcardHandler?.(
-      {
-        raw,
-        url: '/resource',
-        method: 'POST',
-        headers: raw.headers,
-      },
-      reply,
-    )
-
-    expect(mockState.createRequest).toHaveBeenCalledTimes(1)
-    expect(mockState.sendResponse).toHaveBeenCalledTimes(1)
-    expect(capturedRequest).toBeDefined()
-    expect(await capturedRequest?.text()).toBe('hello world')
-  })
-
-  it('passes through application/json requests via node-fetch-server createRequest', async () => {
-    let capturedRequest: Request | undefined
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async (request?: Request) => {
-        capturedRequest = request
-        return new Response('ok')
-      }),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4321,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'POST',
-      headers: {
-        host: 'localhost:3000',
-        'content-type': 'application/json',
-      },
-      body: '{"intent":"reroll-catch-challenge"}',
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-      socket: { encrypted: false },
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await wildcardHandler?.(
-      {
-        raw,
-        url: '/resource',
-        method: 'POST',
-        headers: raw.headers,
-      },
-      reply,
-    )
-
-    expect(mockState.createRequest).toHaveBeenCalledTimes(1)
-    expect(mockState.sendResponse).toHaveBeenCalledTimes(1)
-    expect(capturedRequest).toBeDefined()
-    expect(await capturedRequest?.json()).toEqual({ intent: 'reroll-catch-challenge' })
-  })
-
-  it('uses a custom bodySizeLimit for buffered parsers', async () => {
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-      bodySizeLimit: 123_456,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4322,
-    } as ServeOptions)
-
-    expect(mockState.app.addContentTypeParser).toHaveBeenCalledWith(
-      ['application/x-www-form-urlencoded', 'multipart/form-data'],
-      { parseAs: 'buffer', bodyLimit: 123_456 },
-      expect.any(Function),
-    )
-  })
-
-  it('writes safe 500 fallback when hijacked handler throws', async () => {
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async () => Promise.reject(new Error('boom'))),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4315,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'GET',
-      headers: {},
-      headersSent: false,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await expect(
-      wildcardHandler?.({ raw, url: '/resource', method: 'GET' }, reply),
-    ).rejects.toThrow('boom')
-    expect(raw.statusCode).toBe(500)
-    expect(raw.setHeader).toHaveBeenCalledWith('content-type', 'text/plain; charset=utf-8')
-    expect(raw.end).toHaveBeenCalledWith('Internal Server Error')
-  })
-
-  it('ends the response when headers were already sent and hijacked handler throws', async () => {
-    mockState.createRemixRequestHandler.mockImplementationOnce(() =>
-      vi.fn(async () => Promise.reject(new Error('boom-after-headers'))),
-    )
-
-    let temp = await createTempServerBuildModule()
-    tempDirs.push(temp.dir)
-
-    let run = createServerRunner(pathToFileURL(temp.filePath), {
-      serveClientAssets: false,
-    })
-
-    await run({
-      mode: 'production',
-      host: '127.0.0.1',
-      port: 4316,
-    } as ServeOptions)
-
-    let wildcardHandler = (mockState.app.all.mock.calls.find((call) => call[0] === '/*') ??
-      [])[1] as ((request: any, reply: any) => Promise<void>) | undefined
-
-    let raw = {
-      url: '/resource',
-      method: 'GET',
-      headers: {},
-      headersSent: true,
-      writableEnded: false,
-      statusCode: 200,
-      setHeader: vi.fn(),
-      end: vi.fn(),
-    }
-
-    let reply = {
-      raw,
-      hijack: vi.fn(),
-      sendFile: vi.fn(async () => {
-        throw { statusCode: 404 }
-      }),
-      callNotFound: vi.fn(),
-    }
-
-    await expect(
-      wildcardHandler?.({ raw, url: '/resource', method: 'GET' }, reply),
-    ).rejects.toThrow('boom-after-headers')
-    expect(raw.setHeader).not.toHaveBeenCalled()
-    expect(raw.end).toHaveBeenCalledWith()
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['server-timing']).toMatch(/^total;dur=/)
+    expect(consoleLog).toHaveBeenCalledWith(expect.stringMatching(/^GET \/timed 200 - /))
   })
 })
