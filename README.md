@@ -8,6 +8,9 @@ and returns a runner function that works with
 
 This package is for production-style server builds. It is not a Fastify development server.
 
+This library also assumes that you handle HTTP response body compression in an upper layer (e.g.
+Nginx), so it does not handle that for you.
+
 ## Install
 
 ```bash
