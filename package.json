@@ -8,12 +8,12 @@
     "react-router-server"
   ],
   "bugs": {
-    "url": "https://github.com/itsjavi/react-router-fastify/issues"
+    "url": "https://github.com/dendrell/react-router-fastify/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/itsjavi/react-router-fastify.git"
+    "url": "git+https://github.com/dendrell/react-router-fastify.git"
   },
   "files": [
     "dist/",
@@ -51,10 +51,11 @@
     "lint": "pnpm typecheck",
     "lint:circular": "pnpm dlx madge --circular src/index.ts src/cli.ts",
     "prepublishOnly": "pnpm build",
+    "prestart": "pnpm build",
     "start": "pnpm --filter demo start:cluster",
     "test": "vitest --run",
     "test:coverage": "vitest --run --coverage",
-    "typecheck": "tsc"
+    "typecheck": "tsc && pnpm --filter demo typecheck"
   },
   "dependencies": {
     "@fastify/static": "^9.1.0",

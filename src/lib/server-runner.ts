@@ -23,6 +23,7 @@ type CreateFastifyAppOptions = {
 }
 
 type CreateServerRunnerOptions = CreateFastifyAppOptions & {
+  app?: FastifyInstance
   prepare?: (app: FastifyInstance) => Promise<void>
   mode?: ServerMode
   port?: number
@@ -112,7 +113,18 @@ const handleStaticRequest = async (
   return false
 }
 
+type RSCServerBuild = {
+  fetch: (request: Request) => Response
+  publicPath: string
+  assetsBuildDirectory: string
+}
+
+function isRSCServerBuild(build: ServerBuild | RSCServerBuild): build is RSCServerBuild {
+  return 'fetch' in build && typeof build.fetch === 'function'
+}
+
 async function createFastifyApp(
+  existingApp: FastifyInstance | undefined,
   build: ServerBuild,
   mode: ServerMode | undefined,
   requestOrigin: URL,
@@ -123,7 +135,7 @@ async function createFastifyApp(
   const requestTimeMap = new WeakMap<IncomingMessage, number>()
   const needsHooks = options.serverTimingHeader || options.logRequests
 
-  const app = fastify()
+  const app = existingApp ?? fastify()
   await app.register(fastifyFetch, {
     origin: requestOrigin,
   })
@@ -190,10 +202,15 @@ export function createServerRunner(
     const buildFile = resolveServerBuildFileUrl(serverBundleFile)
     const build: ServerBuild = await import(buildFile.href)
 
+    if (isRSCServerBuild(build)) {
+      throw new Error('RSC Server Builds are not supported yet.')
+    }
+
     const requestOrigin = options.origin
       ? resolveRequestOrigin(options.origin)
       : createRequestOrigin(serverHost, serverPort)
-    const app = await createFastifyApp(build, serverMode, requestOrigin, options)
+
+    const app = await createFastifyApp(options.app, build, serverMode, requestOrigin, options)
 
     await options.prepare?.(app)
     await app.listen({

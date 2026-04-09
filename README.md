@@ -4,12 +4,15 @@ Fastify adapter for React Router server builds.
 
 It wraps a React Router server build with a Fastify app, optionally serves the built client files,
 and returns a runner function that works with
-[`node-cluster-serve`](https://github.com/itsjavi/node-cluster-serve) or direct startup code.
+[`node-cluster-serve`](https://github.com/dendrell/node-cluster-serve) or direct startup code.
 
 This package is for production-style server builds. It is not a Fastify development server.
 
 This library also assumes that you handle HTTP response body compression in an upper layer (e.g.
 Nginx), so it does not handle that for you.
+
+> **Note**: RSC Server Builds are not supported yet, but any PRs for that are welcome as soon as the
+> feature becomes stable in React Router.
 
 ## Install
 
@@ -137,6 +140,11 @@ declare function createServerRunner(
 - Useful behind proxies, TLS termination, or any deployment where the bound listen address is not
   the public origin.
 - If omitted, the adapter falls back to the resolved `host` and `port`.
+
+`options.app`
+
+- Fastify app instance to use for the server.
+- If omitted, a new Fastify app is created.
 
 ## Behavior
 

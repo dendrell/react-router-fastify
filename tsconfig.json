@@ -1,6 +1,6 @@
 {
   "include": ["**/*.ts"],
-  "exclude": ["dist", "node_modules"],
+  "exclude": ["dist", "node_modules", "demo"],
   "compilerOptions": {
     "target": "ES2023",
     "lib": ["ES2023"],
